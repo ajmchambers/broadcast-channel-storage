@@ -1,6 +1,6 @@
 {
   "name": "broadcast-channel-storage",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "localStorage-like API to share temporary state across tabs using Broadcast Channel.",
   "main": "dist/index.js",
   "keywords": [
