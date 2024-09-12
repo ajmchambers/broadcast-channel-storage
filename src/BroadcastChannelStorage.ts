@@ -132,7 +132,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
 
   private async _initialData() {
     return new Promise<Record<string, string>>((resolve) => {
-      let timerId: number | null = null;
+      let timerId: NodeJS.Timeout | null = null;
 
       const handleInitialValues = (
         event: MessageEvent<BroadcastChannelStorageMessage>,
