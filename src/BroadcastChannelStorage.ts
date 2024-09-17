@@ -1,4 +1,38 @@
-import type { TypedEventTarget } from './utils.js';
+// https://dev.to/marcogrcr/type-safe-eventtarget-subclasses-in-typescript-1nkf
+export type TypedEventTarget<EventMap extends object> = {
+  new (): IntermediateEventTarget<EventMap>;
+};
+
+// internal helper type
+interface IntermediateEventTarget<EventMap> extends EventTarget {
+  addEventListener<K extends keyof EventMap>(
+    type: K,
+    callback: (
+      event: EventMap[K] extends Event ? EventMap[K] : never,
+    ) => EventMap[K] extends Event ? void : never,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+
+  addEventListener(
+    type: string,
+    callback: EventListenerOrEventListenerObject | null,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+
+  removeEventListener<K extends keyof EventMap>(
+    type: K,
+    callback: (
+      event: EventMap[K] extends Event ? EventMap[K] : never,
+    ) => EventMap[K] extends Event ? void : never,
+    options?: EventListenerOptions | boolean,
+  ): void;
+
+  removeEventListener(
+    type: string,
+    callback: EventListenerOrEventListenerObject | null,
+    options?: EventListenerOptions | boolean,
+  ): void;
+}
 
 export type BroadcastChannelStorageMessage =
   | {
@@ -28,6 +62,8 @@ export type BroadcastChannelStorageOptions = {
   channelName?: string;
   /** Timeout cutoff to get a response from channel */
   responseTimeoutMs?: number;
+  /** initial data */
+  initialData?: Record<string, string>;
 };
 
 const DEFAULT_CHANNEL_NAME = '__broadcast_channel-storage';
@@ -51,11 +87,15 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
     const {
       channelName = DEFAULT_CHANNEL_NAME,
       responseTimeoutMs = DEFAULT_RESPONSE_TIMEOUT,
+      initialData = {},
     } = options;
     this._options = {
       channelName,
       responseTimeoutMs,
     };
+    for (const key in initialData) {
+      this._storedValues.set(key, initialData[key] as string);
+    }
     this._channel = new BroadcastChannel(this._options.channelName);
     this._initPromise = this._init();
   }

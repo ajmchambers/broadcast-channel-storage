@@ -1,4 +1,4 @@
-import { BroadcastChannelStorage } from './BroadcastChannelStorage.js';
+import { BroadcastChannelStorage } from '../src/BroadcastChannelStorage.js';
 import { test, expect } from 'vitest';
 
 test('should set and get an item correctly', async () => {
