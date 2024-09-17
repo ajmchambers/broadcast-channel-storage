@@ -34,13 +34,23 @@ interface IntermediateEventTarget<EventMap> extends EventTarget {
   ): void;
 }
 
+type StoredValue = {
+  value: string | null;
+  timestamp: Date | null;
+};
+
+type StoredValueSerialized = {
+  value: string | null;
+  timestamp: string | null;
+};
+
 export type BroadcastChannelStorageMessage =
   | {
       type: 'request';
     }
   | {
       type: 'values';
-      payload: Record<string, string>;
+      payload: Record<string, StoredValueSerialized>;
     }
   | {
       type: 'clear';
@@ -50,11 +60,15 @@ export type BroadcastChannelStorageMessage =
       payload: {
         key: string;
         value: string;
+        timestamp: string;
       };
     }
   | {
       type: 'remove';
-      payload: string;
+      payload: {
+        key: string;
+        timestamp: string;
+      };
     };
 
 export type BroadcastChannelStorageOptions = {
@@ -63,7 +77,7 @@ export type BroadcastChannelStorageOptions = {
   /** Timeout cutoff to get a response from channel */
   responseTimeoutMs?: number;
   /** initial data */
-  initialData?: Record<string, string>;
+  initialData?: Record<string, string | null>;
 };
 
 const DEFAULT_CHANNEL_NAME = '__broadcast_channel-storage';
@@ -74,7 +88,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
 }>) {
   private _options;
   private _channel: BroadcastChannel;
-  private _storedValues: Map<string, string> = new Map();
+  private _storedValues: Map<string, StoredValue> = new Map();
   private _initPromise: Promise<void>;
   private _channelListener: { cancel: () => void } | null = null;
   private _listeners: {
@@ -94,7 +108,10 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       responseTimeoutMs,
     };
     for (const key in initialData) {
-      this._storedValues.set(key, initialData[key] as string);
+      this._storedValues.set(key, {
+        value: initialData[key] ?? null,
+        timestamp: null,
+      });
     }
     this._channel = new BroadcastChannel(this._options.channelName);
     this._initPromise = this._init();
@@ -105,7 +122,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       throw new Error('invalid key');
     }
     await this._initPromise;
-    const value = this._storedValues.get(key) || null;
+    const value = this._storedValues.get(key)?.value || null;
     return value;
   }
 
@@ -114,14 +131,22 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       throw new Error('invalid key');
     }
     await this._initPromise;
-    const oldValue = this._storedValues.get(key) || null;
-    if (value === oldValue) return;
-    this._storedValues.set(key, value);
+    const newValue = {
+      value,
+      timestamp: new Date(),
+    };
+    const oldValue = this._storedValues.get(key) || {
+      value: null,
+      timestamp: null,
+    };
+    if (newValue.value === oldValue.value) return;
+    this._storedValues.set(key, newValue);
     this._postMessage({
       type: 'set',
       payload: {
         key,
         value,
+        timestamp: newValue.timestamp.toISOString(),
       },
     });
   }
@@ -131,13 +156,22 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       throw new Error('invalid key');
     }
     await this._initPromise;
-    const newValue = null;
-    const oldValue = this._storedValues.get(key) || null;
-    if (newValue === oldValue) return;
+    const newValue = {
+      value: null,
+      timestamp: new Date(),
+    };
+    const oldValue = this._storedValues.get(key) || {
+      value: null,
+      timestamp: null,
+    };
+    if (newValue.value === oldValue.value) return;
     this._storedValues.delete(key);
     this._postMessage({
       type: 'remove',
-      payload: key,
+      payload: {
+        key,
+        timestamp: newValue.timestamp.toISOString(),
+      },
     });
   }
 
@@ -158,6 +192,13 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
     this._listeners = [];
   }
 
+  async sync() {
+    const initialData = await this._initialData();
+    for (const key in initialData) {
+      this._storedValues.set(key, initialData[key]!);
+    }
+  }
+
   private _postMessage(message: BroadcastChannelStorageMessage) {
     this._channel.postMessage(message);
   }
@@ -165,13 +206,13 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
   private async _init() {
     const initialData = await this._initialData();
     for (const key in initialData) {
-      this._storedValues.set(key, initialData[key] as string);
+      this._storedValues.set(key, initialData[key]!);
     }
     this._channelListener = this._listen();
   }
 
   private async _initialData() {
-    return new Promise<Record<string, string>>((resolve) => {
+    return new Promise<Record<string, StoredValue>>((resolve) => {
       let timerId: NodeJS.Timeout | null = null;
 
       const handleInitialValues = (
@@ -182,8 +223,16 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         if (timerId) {
           clearTimeout(timerId);
         }
+        const initialData = action.payload;
+        const output: Record<string, StoredValue> = {};
+        for (const [key, { value, timestamp }] of Object.entries(initialData)) {
+          output[key] = {
+            value,
+            timestamp: timestamp !== null ? new Date(timestamp) : null,
+          };
+        }
         this._channel.removeEventListener('message', handleInitialValues);
-        resolve(action.payload);
+        resolve(output);
       };
 
       timerId = setTimeout(() => {
@@ -202,9 +251,13 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       const action = event.data;
 
       if (action.type === 'request') {
-        const values: Record<string, string> = {};
+        const values: Record<string, StoredValueSerialized> = {};
         for (const key in this._storedValues) {
-          values[key] = this._storedValues.get(key)!;
+          const { value, timestamp } = this._storedValues.get(key)!;
+          values[key] = {
+            value,
+            timestamp: timestamp !== null ? timestamp.toISOString() : null,
+          };
         }
         this._postMessage({
           type: 'values',
@@ -214,14 +267,18 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       }
 
       if (action.type === 'set') {
-        const { key, value: newValue } = action.payload;
-        const oldValue = this._storedValues.get(key) || null;
-        if (oldValue === newValue) return;
+        const { key, value, timestamp } = action.payload;
+        const newValue = { value, timestamp: new Date(timestamp) };
+        const oldValue = this._storedValues.get(key) || {
+          value: null,
+          timestamp: null,
+        };
+        if (oldValue.value === newValue.value) return;
         this._storedValues.set(key, newValue);
         const storageEvent = new StorageEvent('storage', {
           key,
-          oldValue,
-          newValue,
+          oldValue: oldValue.value,
+          newValue: newValue.value,
           url: window.location.href,
         });
         this.dispatchEvent(storageEvent);
@@ -229,15 +286,21 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       }
 
       if (action.type === 'remove') {
-        const key = action.payload;
-        const newValue = null;
-        const oldValue = this._storedValues.get(key) || null;
+        const { key, timestamp } = action.payload;
+        const newValue = {
+          value: null,
+          timestamp: new Date(timestamp),
+        };
+        const oldValue = this._storedValues.get(key) || {
+          value: null,
+          timestamp: null,
+        };
         if (oldValue === newValue) return;
         this._storedValues.delete(key);
         const storageEvent = new StorageEvent('storage', {
           key,
-          oldValue,
-          newValue,
+          oldValue: oldValue.value,
+          newValue: newValue.value,
           url: window.location.href,
         });
         this.dispatchEvent(storageEvent);
