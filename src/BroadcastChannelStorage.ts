@@ -1,5 +1,5 @@
 // https://dev.to/marcogrcr/type-safe-eventtarget-subclasses-in-typescript-1nkf
-export type TypedEventTarget<EventMap extends object> = {
+type TypedEventTarget<EventMap extends object> = {
   new (): IntermediateEventTarget<EventMap>;
 };
 
@@ -34,41 +34,78 @@ interface IntermediateEventTarget<EventMap> extends EventTarget {
   ): void;
 }
 
-type StoredValue = {
-  value: string | null;
-  timestamp: Date | null;
+/**
+ * Timestamp: need higher resolution timestamp so using performance.now() + performance.timeOrigin
+ * - performance.timeOrigin // the time when the browser context was created
+ * - performance.now() // time since performance.timeOrigin
+ */
+let lastUniqueTimestamp = 0;
+
+export const getUniqueTimestamp = () => {
+  let currentTimestamp = performance.timeOrigin + performance.now();
+  if (currentTimestamp <= lastUniqueTimestamp) {
+    currentTimestamp = lastUniqueTimestamp + 0.001; // increment to ensure newer timestamps occur after last timestamp
+  }
+  lastUniqueTimestamp = currentTimestamp;
+  return currentTimestamp;
 };
 
-type InstanceState = {
-  instanceId: string;
-  instanceTimestamp: Date;
+export type StoredValue = {
+  value: string | null;
+  timestamp: number;
+};
+
+export type InstanceState = {
+  clearedTimestamp: null | number;
   values: Record<string, StoredValue>;
 };
 
-export function consolidateValues(
-  current: InstanceState,
-  incoming: InstanceState,
-) {
+export function mergeValues(current: InstanceState, incoming: InstanceState) {
   const {
-    instanceId: currentInstanceId,
-    instanceTimestamp: currentInstanceTimestamp,
-    values: currentValues,
+    clearedTimestamp: currentClearedTimestamp,
+    values: mergedValues,
   } = current;
   const {
-    instanceId: incomingInstanceId,
-    instanceTimestamp: incomingInstanceTimestamp,
+    clearedTimestamp: incomingClearedTimestamp,
     values: incomingValues,
   } = incoming;
-  const changedCurrentValues: Record<string, StoredValue> = {};
-  const changedIncomingValues: Record<string, StoredValue> = {};
+  const changedValues: Record<string, StoredValue> = {};
+  const clearedValues: string[] = [];
 
+  const clearedTimestamp: number | null =
+    incomingClearedTimestamp === currentClearedTimestamp
+      ? currentClearedTimestamp
+      : Math.max(
+          incomingClearedTimestamp ?? -Infinity,
+          currentClearedTimestamp ?? -Infinity,
+        );
+
+  // if cleared timestamp has changed, then clear any values older
+  if (clearedTimestamp && clearedTimestamp !== currentClearedTimestamp) {
+    for (const key in mergedValues) {
+      const currentValue = mergedValues[key]!;
+
+      if (currentValue.timestamp <= clearedTimestamp) {
+        delete mergedValues[key];
+        clearedValues.push(key);
+      }
+    }
+  }
+
+  // loop over incoming values and merge with current values
   for (const key in incomingValues) {
     const incomingValue = incomingValues[key]!;
-    const currentValue = currentValues[key];
+    const currentValue = mergedValues[key];
 
-    // current value did not exist
+    // If value is older than latest cleared timestamp, ignore it
+    if (clearedTimestamp && clearedTimestamp !== incomingClearedTimestamp && incomingValue.timestamp <= clearedTimestamp) {
+      continue;
+    }
+
+    // value is new
     if (!currentValue) {
-      changedCurrentValues[key] = incomingValue;
+      mergedValues[key] = incomingValue;
+      changedValues[key] = incomingValue;
       continue;
     }
 
@@ -80,70 +117,76 @@ export function consolidateValues(
       continue;
     }
 
-    if (!currentValue.timestamp && !incomingValue.timestamp) {
-      // initial values differ
-      if (
-        incomingInstanceTimestamp > currentInstanceTimestamp ||
-        (incomingInstanceTimestamp.getTime() ===
-          currentInstanceTimestamp.getTime() &&
-          incomingInstanceId > currentInstanceId)
+    // values differ but have same timestamp
+    if (currentValue.timestamp === incomingValue.timestamp && currentValue.value !== incomingValue.value) {
+      if (incomingValue.value && !currentValue.value) {
+        // use non-null value
+        mergedValues[key] = incomingValue;
+        changedValues[key] = incomingValue;
+      } else if (
+        incomingValue.value &&
+        currentValue.value &&
+        incomingValue.value > currentValue.value
       ) {
-        // incoming value is newer OR id is lexicographically greater (so same winner is picked)
-        changedCurrentValues[key] = incomingValue;
-      } else {
-        // incoming value is older OR id is lexicographically less (so same winner is picked)
-        changedIncomingValues[key] = currentValue;
+        // use largest value lexicographically
+        mergedValues[key] = incomingValue;
+        changedValues[key] = incomingValue;
       }
-    } else if (currentValue.timestamp === null) {
-      changedCurrentValues[key] = incomingValue;
-    } else if (incomingValue.timestamp === null) {
-      changedIncomingValues[key] = currentValue;
-    } else if (incomingValue.timestamp > currentValue.timestamp) {
-      changedCurrentValues[key] = incomingValue;
-    } else {
-      changedIncomingValues[key] = currentValue;
+    }
+
+    // values differ and both have different timestamp
+    if (incomingValue.timestamp > currentValue.timestamp) {
+      // both values have a timestamp and the incoming value's is newer
+      mergedValues[key] = incomingValue;
+      changedValues[key] = incomingValue;
     }
   }
 
   return {
-    changedCurrentValues,
-    changedIncomingValues,
+    clearedTimestamp,
+    mergedValues,
+    changedValues,
+    clearedValues
   };
 }
 
 export type BroadcastChannelStorageMessage =
   | {
-      type: 'sync_request';
-      payload: InstanceState;
-    }
-  | {
-      type: 'sync_response';
-      payload: InstanceState;
-    }
-  | {
       type: 'request';
+      payload: InstanceState;
     }
   | {
-      type: 'values';
-      payload: Record<string, StoredValue>;
+      type: 'state';
+      payload: InstanceState;
     }
   | {
       type: 'clear';
+      payload: number; // timestamp
     }
   | {
       type: 'set';
       payload: {
         key: string;
         value: string;
-        timestamp: Date;
+        timestamp: number;
+        clearedTimestamp: null | number;
       };
     }
   | {
       type: 'remove';
       payload: {
         key: string;
-        timestamp: Date;
+        timestamp: number;
+        clearedTimestamp: null | number;
       };
+    }
+  | {
+      type: 'ping';
+      payload: number;
+    }
+  | {
+      type: 'pong';
+      payload: number;
     };
 
 export type BroadcastChannelStorageOptions = {
@@ -151,18 +194,10 @@ export type BroadcastChannelStorageOptions = {
   channelName?: string;
   /** Timeout cutoff to get a response from channel */
   responseTimeoutMs?: number;
-  /** initial data */
-  initialData?: Record<string, string | null>;
 };
 
 const DEFAULT_CHANNEL_NAME = '__broadcast_channel-storage';
-const DEFAULT_RESPONSE_TIMEOUT = 50;
-
-// export type BroadcastChannelStorageEvent = CustomEvent<{
-//   readonly key: string | null;
-//   readonly oldValue: string | null;
-//   readonly newValue: string | null;
-// }>
+const DEFAULT_RESPONSE_TIMEOUT = 30;
 
 export class BroadcastChannelStorageEvent extends Event {
   key: string | null;
@@ -186,59 +221,154 @@ export class BroadcastChannelStorageEvent extends Event {
 export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
   storage: BroadcastChannelStorageEvent;
 }>) {
-  private _options;
-  private _channel: BroadcastChannel;
-  private _id: string;
-  private _creationTimestamp: Date;
+  private _options: Required<BroadcastChannelStorageOptions>;
   private _storedValues: Map<string, StoredValue> = new Map();
-  private _initPromise: Promise<void>;
-  private _channelListener: { cancel: () => void } | null = null;
+  private _clearedTimestamp: number | null = null;
+  private _channel: BroadcastChannel;
+  private _readyPromise: Promise<void>;
+  private _ready: boolean = false;
   private _listeners: {
     type: string;
     callback: EventListenerOrEventListenerObject;
   }[] = [];
+  private _lastInstance: boolean = false;
 
   constructor(options: BroadcastChannelStorageOptions = {}) {
     super();
     const {
       channelName = DEFAULT_CHANNEL_NAME,
-      responseTimeoutMs = DEFAULT_RESPONSE_TIMEOUT,
-      initialData = {},
+      responseTimeoutMs = DEFAULT_RESPONSE_TIMEOUT
     } = options;
     this._options = {
       channelName,
-      responseTimeoutMs,
+      responseTimeoutMs
     };
-    // 6 character string for id - not guaranteed to be unique
-    this._id = Math.random()
-      .toString(36)
-      .substring(2, 6 + 2);
-    this._creationTimestamp = new Date();
-    for (const key in initialData) {
-      this._storedValues.set(key, {
-        value: initialData[key] ?? null,
-        timestamp: null,
-      });
-    }
-    this._channel = new BroadcastChannel(this._options.channelName);
-    this._initPromise = this._init();
+    this._channel = new BroadcastChannel(channelName);
+    this._listen();
+    this._readyPromise = this.ready();
   }
 
-  getItemSync(key: string) {
+  get values() {
+    let storedValues: Record<string, string> = {}
+    for (const key of this._storedValues.keys()) {
+      const value = this._storedValues.get(key)?.value;
+      if (value) {
+        storedValues[key] = value;
+      }
+    }
+    return storedValues;
+  }
+
+  get length() {
+    return Object.keys(this.values).length;
+  }
+
+  get isReady() {
+    return this._ready;
+  }
+
+  get isLastInstance() {
+    return this._lastInstance;
+  }
+
+  ready() {
+    if (this._readyPromise) {
+      return this._readyPromise;
+    }
+
+    return this.sync().then(() => {
+      this._ready = true;
+    })
+  }
+
+  // OLD SYNC, waited until time had completed with no further responses.
+  // sync() {
+  //   if (!this._ready && this._readyPromise) {
+  //     return this._readyPromise;
+  //   }
+
+  //   return new Promise<void>((resolve, reject) => {
+  //     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  //     const handleTimeout = () => {
+  //       this._channel.removeEventListener('message', handleValuesResponse);
+  //       resolve();
+  //     };
+
+  //     const handleValuesResponse = (
+  //       event: MessageEvent<BroadcastChannelStorageMessage>,
+  //     ) => {
+  //       const action = event.data;
+  //       if (action.type !== 'state') return;
+  //       if (timeoutId) {
+  //         clearTimeout(timeoutId);
+  //       }
+  //       timeoutId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
+  //     };
+
+  //     this._channel.addEventListener('message', handleValuesResponse);
+  //     timeoutId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
+
+  //     const current: InstanceState = {
+  //       clearedTimestamp: this._clearedTimestamp,
+  //       values: Object.fromEntries(this._storedValues),
+  //     };
+  //     this._postMessage({ type: 'request', payload: current });
+  //   }) 
+  // }
+
+  sync() {
+    if (!this._ready && this._readyPromise) {
+      return this._readyPromise;
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const handleTimeout = () => {
+        this._channel.removeEventListener('message', handleValuesResponse);
+        this._lastInstance = true;
+        resolve();
+      };
+
+      const handleValuesResponse = (
+        event: MessageEvent<BroadcastChannelStorageMessage>,
+      ) => {
+        const action = event.data;
+        if (action.type !== 'request' && action.type !== 'state') return;
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        this._lastInstance = false;
+        resolve();
+      };
+
+      this._channel.addEventListener('message', handleValuesResponse, { once: true });
+      timeoutId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
+
+      const current: InstanceState = {
+        clearedTimestamp: this._clearedTimestamp,
+        values: Object.fromEntries(this._storedValues),
+      };
+      this._postMessage({ type: 'request', payload: current });
+    }) 
+  }
+
+  getItem = (key: string) => {
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('invalid key');
     }
     const value = this._storedValues.get(key)?.value || null;
     return value;
-  }
+  };
 
-  setItemSync(key: string, value: string) {
+  setItem = (key: string, value: string) => {
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('invalid key');
     }
     const newValue = {
       value,
-      timestamp: new Date(),
+      timestamp: getUniqueTimestamp(),
     };
     const oldValue = this._storedValues.get(key) || {
       value: null,
@@ -252,283 +382,223 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         key,
         value,
         timestamp: newValue.timestamp,
+        clearedTimestamp: this._clearedTimestamp
       },
     });
-  }
+  };
 
-  removeItemSync(key: string) {
+  removeItem = (key: string) => {
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('invalid key');
     }
     const newValue = {
       value: null,
-      timestamp: new Date(),
+      timestamp: getUniqueTimestamp(),
     };
-    const oldValue = this._storedValues.get(key) || {
-      value: null,
-      timestamp: null,
-    };
-    if (newValue.value === oldValue.value) return;
     this._storedValues.set(key, newValue);
     this._postMessage({
       type: 'remove',
       payload: {
         key,
         timestamp: newValue.timestamp,
+        clearedTimestamp: this._clearedTimestamp
       },
     });
-  }
+  };
 
-  async getItem(key: string) {
-    if (typeof key !== 'string' || key.length === 0) {
-      throw new Error('invalid key');
-    }
-    await this._initPromise;
-    const value = this._storedValues.get(key)?.value || null;
-    return value;
-  }
-
-  async setItem(key: string, value: string) {
-    if (typeof key !== 'string' || key.length === 0) {
-      throw new Error('invalid key');
-    }
-    await this._initPromise;
-    const newValue = {
-      value,
-      timestamp: new Date(),
-    };
-    const oldValue = this._storedValues.get(key) || {
-      value: null,
-      timestamp: null,
-    };
-    if (newValue.value === oldValue.value) return;
-    this._storedValues.set(key, newValue);
-    this._postMessage({
-      type: 'set',
-      payload: {
-        key,
-        value,
-        timestamp: newValue.timestamp,
-      },
-    });
-  }
-
-  async removeItem(key: string) {
-    if (typeof key !== 'string' || key.length === 0) {
-      throw new Error('invalid key');
-    }
-    await this._initPromise;
-    const newValue = {
-      value: null,
-      timestamp: new Date(),
-    };
-    const oldValue = this._storedValues.get(key) || {
-      value: null,
-      timestamp: null,
-    };
-    if (newValue.value === oldValue.value) return;
-    this._storedValues.delete(key);
-    this._postMessage({
-      type: 'remove',
-      payload: {
-        key,
-        timestamp: newValue.timestamp,
-      },
-    });
-  }
-
-  async clear() {
-    await this._initPromise;
+  clear = () => {
+    const clearedTimestamp = getUniqueTimestamp();
     this._storedValues.clear();
+    this._clearedTimestamp = clearedTimestamp;
     this._postMessage({
       type: 'clear',
+      payload: clearedTimestamp,
     });
-  }
+  };
 
-  destroy() {
-    this._channelListener?.cancel();
-    this._channel.close();
-    for (const { type, callback } of this._listeners) {
-      super.removeEventListener(type, callback);
-    }
-    this._listeners = [];
-  }
+  // instanceCount = async () => {
+  //   await this._readyPromise;
+  //   return new Promise<number>((resolve) => {
+  //     const channel = this._channel;
+  //     const timestamp = getUniqueTimestamp();
+  //     let timerId: ReturnType<typeof setTimeout> | null = null;
+  //     let instanceCount: number = 1;
 
-  async sync() {
-    const currentInstance: InstanceState = {
-      instanceTimestamp: this._creationTimestamp,
-      values: Object.fromEntries(this._storedValues),
-    };
-    this._postMessage({
-      type: 'sync_request',
-      payload: currentInstance,
-    });
-  }
+  //     const handleTimeout = () => {
+  //       channel.removeEventListener('message', handlePongEvent);
+  //       resolve(instanceCount);
+  //     };
+
+  //     const handlePongEvent = (
+  //       event: MessageEvent<BroadcastChannelStorageMessage>,
+  //     ) => {
+  //       const action = event.data;
+  //       if (action.type !== 'pong' || action.payload !== timestamp) return;
+  //       instanceCount++;
+  //       if (timerId) {
+  //         clearTimeout(timerId);
+  //       }
+  //       timerId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
+  //     };
+
+  //     channel.addEventListener('message', handlePongEvent);
+  //     this._postMessage({ type: 'ping', payload: timestamp });
+
+  //     timerId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
+  //   });
+  // };
 
   private _postMessage(message: BroadcastChannelStorageMessage) {
     this._channel.postMessage(message);
   }
 
-  private async _init() {
-    this.sync();
-    const initialData = await this._initialData();
-    for (const key in initialData) {
-      this._storedValues.set(key, initialData[key]!);
+  private _merge(incoming: InstanceState, dispatchEvents = false) {
+    const current: InstanceState = {
+      clearedTimestamp: this._clearedTimestamp,
+      values: Object.fromEntries(this._storedValues),
+    };
+    const { clearedTimestamp, mergedValues, changedValues, clearedValues } = mergeValues(current, incoming);
+
+    // Update cleared timestamp
+    if (this._clearedTimestamp !== clearedTimestamp) {
+      this._clearedTimestamp = clearedTimestamp;
     }
-    this._channelListener = this._listen();
-  }
-
-  private async _initialData() {
-    return new Promise<Record<string, StoredValue>>((resolve) => {
-      let timerId: NodeJS.Timeout | null = null;
-
-      const handleInitialValues = (
-        event: MessageEvent<BroadcastChannelStorageMessage>,
-      ) => {
-        const action = event.data;
-        if (action.type !== 'values') return;
-        if (timerId) {
-          clearTimeout(timerId);
-        }
-        const initialData = action.payload;
-        const output: Record<string, StoredValue> = {};
-        for (const [key, { value, timestamp }] of Object.entries(initialData)) {
-          output[key] = {
-            value,
-            timestamp: timestamp !== null ? new Date(timestamp) : null,
-          };
-        }
-        this._channel.removeEventListener('message', handleInitialValues);
-        resolve(output);
-      };
-
-      timerId = setTimeout(() => {
-        this._channel.removeEventListener('message', handleInitialValues);
-        resolve({});
-      }, this._options.responseTimeoutMs);
-
-      this._channel.addEventListener('message', handleInitialValues);
-
-      this._postMessage({ type: 'request' });
-    });
-  }
-
-  private _listen() {
-    const listener = (event: MessageEvent<BroadcastChannelStorageMessage>) => {
-      console.log('listener', event);
-      const action = event.data;
-
-      if (action.type === 'sync_request' || action.type === 'sync_response') {
-        debugger;
-        console.log('received sync event', event.data);
-        const current: InstanceState = {
-          instanceTimestamp: this._creationTimestamp,
-          values: Object.fromEntries(this._storedValues),
+    
+    if (Object.keys(mergedValues).length === 0 && clearedValues.length > 0) {
+      // Handle when all keys are cleared
+      this._storedValues.clear();
+      const storageEvent = new BroadcastChannelStorageEvent('storage', {
+        key: null,
+        oldValue: null,
+        newValue: null,
+      });
+      if (dispatchEvents) {
+        this.dispatchEvent(storageEvent);
+      }
+    } else {
+      // Update changed values
+      for (const key in changedValues) {
+        const oldValue = this._storedValues.get(key) || {
+          value: null
         };
-        const incoming = action.payload;
-
-        const { changedCurrentValues, changedIncomingValues } =
-          consolidateValues(current, incoming);
-
-        for (const key in changedCurrentValues) {
-          const oldValue = this._storedValues.get('key') || {
-            value: null,
-            timestamp: null,
-          };
-          const newValue = changedCurrentValues[key]!;
-          this._storedValues.set('key', newValue);
-          if (oldValue.value !== newValue.value) {
-            const storageEvent = new BroadcastChannelStorageEvent('storage', {
-              key,
-              oldValue: oldValue.value,
-              newValue: newValue.value,
-            });
+        const newValue = changedValues[key]!;
+        this._storedValues.set(key, newValue);
+        if (oldValue.value !== newValue.value) {
+          const storageEvent = new BroadcastChannelStorageEvent('storage', {
+            key,
+            oldValue: oldValue.value,
+            newValue: newValue.value,
+          });
+          if (dispatchEvents) {
             this.dispatchEvent(storageEvent);
           }
         }
+      }
+      // Remove cleared values
+      clearedValues.forEach(key => {
+        const oldValue = this._storedValues.get(key)!;
+        this._storedValues.delete(key);
+        if (oldValue.value !== null) {
+          const storageEvent = new BroadcastChannelStorageEvent('storage', {
+            key,
+            oldValue: oldValue.value,
+            newValue: null,
+          });
+          if (dispatchEvents) {
+            this.dispatchEvent(storageEvent);
+          }
+        }
+      })
+    }
 
-        if (Object.keys(changedIncomingValues).length > 0) {
-          debugger;
+    return { clearedTimestamp, mergedValues, changedValues, clearedValues };
+  }
+
+  private _listen() {
+    const channel = this._channel;
+
+    const supportsVisibilityChange = typeof document !== 'undefined' && 'visibilityState' in document;
+
+    const visibilityListener = () => {
+      if (supportsVisibilityChange && document.visibilityState === "visible") {
+        const current: InstanceState = {
+          clearedTimestamp: this._clearedTimestamp,
+          values: Object.fromEntries(this._storedValues),
+        };
+        this._postMessage({ type: 'request', payload: current });
+      }
+    }
+    
+    const channelListener = (event: MessageEvent<BroadcastChannelStorageMessage>) => {
+      const action = event.data;
+
+      if (action.type === 'ping') {
+        this._lastInstance = false;
+        this._postMessage({ type: 'pong', payload: action.payload });
+      }
+
+      if (action.type === 'request' || action.type === 'state') {
+        const incoming = action.payload;
+        this._merge(incoming, true);
+
+        if (action.type === 'request') {
           this._postMessage({
-            type: 'sync_response',
+            type: 'state',
             payload: {
-              instanceTimestamp: this._creationTimestamp,
-              values: changedIncomingValues,
+              clearedTimestamp: this._clearedTimestamp,
+              values: Object.fromEntries(this._storedValues),
             },
           });
         }
       }
 
-      if (action.type === 'request') {
-        const values: Record<string, StoredValue> = {};
-        for (const key in this._storedValues) {
-          const { value, timestamp } = this._storedValues.get(key)!;
-          values[key] = {
-            value,
-            timestamp,
-          };
-        }
-        this._postMessage({
-          type: 'values',
-          payload: values,
-        });
-        return;
-      }
-
       if (action.type === 'set') {
-        const { key, value, timestamp } = action.payload;
-        const newValue = { value, timestamp: new Date(timestamp) };
-        const oldValue = this._storedValues.get(key) || {
-          value: null,
-          timestamp: null,
+        const { key, value, timestamp, clearedTimestamp } = action.payload;
+        const incoming: InstanceState = {
+          clearedTimestamp,
+          values: {
+            [key]: { value, timestamp }
+          }
         };
-        if (oldValue.value === newValue.value) return;
-        this._storedValues.set(key, newValue);
-        const storageEvent = new BroadcastChannelStorageEvent('storage', {
-          key,
-          oldValue: oldValue.value,
-          newValue: newValue.value,
-        });
-        this.dispatchEvent(storageEvent);
+        this._merge(incoming, true);
         return;
       }
 
       if (action.type === 'remove') {
-        const { key, timestamp } = action.payload;
-        const newValue = {
-          value: null,
-          timestamp: new Date(timestamp),
+        const { key, timestamp, clearedTimestamp } = action.payload;
+        const incoming: InstanceState = {
+          clearedTimestamp,
+          values: {
+            [key]: { value: null, timestamp }
+          }
         };
-        const oldValue = this._storedValues.get(key) || {
-          value: null,
-          timestamp: null,
-        };
-        if (oldValue === newValue) return;
-        this._storedValues.delete(key);
-        const storageEvent = new BroadcastChannelStorageEvent('storage', {
-          key,
-          oldValue: oldValue.value,
-          newValue: newValue.value,
-        });
-        this.dispatchEvent(storageEvent);
+        this._merge(incoming, true);
         return;
       }
 
       if (action.type === 'clear') {
-        this._storedValues.clear();
-        const storageEvent = new BroadcastChannelStorageEvent('storage', {
-          key: null,
-          oldValue: null,
-          newValue: null,
-        });
-        this.dispatchEvent(storageEvent);
+        const clearedTimestamp = action.payload;
+        const incoming: InstanceState = {
+          clearedTimestamp,
+          values: {}
+        };
+        this._merge(incoming, true);
         return;
       }
     };
 
-    this._channel.addEventListener('message', listener);
+    channel.addEventListener('message', channelListener);
+    if (supportsVisibilityChange) { 
+      document.addEventListener('visibilitychange', visibilityListener);
+    }
+
     return {
-      cancel: () => this._channel.removeEventListener('message', listener),
+      cancel: () => {
+        channel.removeEventListener('message', channelListener);
+        if (supportsVisibilityChange) { 
+          document.removeEventListener('visibilitychange', visibilityListener);
+        }
+      },
     };
   }
 
