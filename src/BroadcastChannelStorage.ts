@@ -61,14 +61,10 @@ export type InstanceState = {
 };
 
 export function mergeValues(current: InstanceState, incoming: InstanceState) {
-  const {
-    clearedTimestamp: currentClearedTimestamp,
-    values: mergedValues,
-  } = current;
-  const {
-    clearedTimestamp: incomingClearedTimestamp,
-    values: incomingValues,
-  } = incoming;
+  const { clearedTimestamp: currentClearedTimestamp, values: mergedValues } =
+    current;
+  const { clearedTimestamp: incomingClearedTimestamp, values: incomingValues } =
+    incoming;
   const changedValues: Record<string, StoredValue> = {};
   const clearedValues: string[] = [];
 
@@ -80,7 +76,7 @@ export function mergeValues(current: InstanceState, incoming: InstanceState) {
           currentClearedTimestamp ?? -Infinity,
         );
 
-  // if cleared timestamp has changed, then clear any values older
+  // if cleared timestamp has changed, then clear any values equal or older
   if (clearedTimestamp && clearedTimestamp !== currentClearedTimestamp) {
     for (const key in mergedValues) {
       const currentValue = mergedValues[key]!;
@@ -98,7 +94,11 @@ export function mergeValues(current: InstanceState, incoming: InstanceState) {
     const currentValue = mergedValues[key];
 
     // If value is older than latest cleared timestamp, ignore it
-    if (clearedTimestamp && clearedTimestamp !== incomingClearedTimestamp && incomingValue.timestamp <= clearedTimestamp) {
+    if (
+      clearedTimestamp &&
+      clearedTimestamp !== incomingClearedTimestamp &&
+      incomingValue.timestamp <= clearedTimestamp
+    ) {
       continue;
     }
 
@@ -118,7 +118,10 @@ export function mergeValues(current: InstanceState, incoming: InstanceState) {
     }
 
     // values differ but have same timestamp
-    if (currentValue.timestamp === incomingValue.timestamp && currentValue.value !== incomingValue.value) {
+    if (
+      currentValue.timestamp === incomingValue.timestamp &&
+      currentValue.value !== incomingValue.value
+    ) {
       if (incomingValue.value && !currentValue.value) {
         // use non-null value
         mergedValues[key] = incomingValue;
@@ -146,7 +149,7 @@ export function mergeValues(current: InstanceState, incoming: InstanceState) {
     clearedTimestamp,
     mergedValues,
     changedValues,
-    clearedValues
+    clearedValues,
   };
 }
 
@@ -181,23 +184,20 @@ export type BroadcastChannelStorageMessage =
       };
     }
   | {
-      type: 'ping';
-      payload: number;
-    }
-  | {
-      type: 'pong';
-      payload: number;
+      type: 'close';
+      payload: InstanceState;
     };
 
 export type BroadcastChannelStorageOptions = {
-  /** Name for the broadcast-channel, default is "__broadcast_channel-storage" */
+  /** Name for the broadcast-channel, default is "__broadcast-channel-storage" */
   channelName?: string;
   /** Timeout cutoff to get a response from channel */
   responseTimeoutMs?: number;
 };
 
-const DEFAULT_CHANNEL_NAME = '__broadcast_channel-storage';
-const DEFAULT_RESPONSE_TIMEOUT = 30;
+const DEFAULT_CHANNEL_NAME = '__broadcast-channel-storage';
+const DEFAULT_RESPONSE_TIMEOUT = 200;
+const ERROR_CLOSED_MESSAGE = 'Channel is closed';
 
 export class BroadcastChannelStorageEvent extends Event {
   key: string | null;
@@ -226,30 +226,32 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
   private _clearedTimestamp: number | null = null;
   private _channel: BroadcastChannel;
   private _readyPromise: Promise<void>;
-  private _ready: boolean = false;
+  private _readyAbortController: AbortController = new AbortController();
+  private _channelListener;
   private _listeners: {
     type: string;
     callback: EventListenerOrEventListenerObject;
   }[] = [];
   private _lastInstance: boolean = false;
+  private _status: 'loading' | 'ready' | 'closed' = 'loading';
 
   constructor(options: BroadcastChannelStorageOptions = {}) {
     super();
     const {
       channelName = DEFAULT_CHANNEL_NAME,
-      responseTimeoutMs = DEFAULT_RESPONSE_TIMEOUT
+      responseTimeoutMs = DEFAULT_RESPONSE_TIMEOUT,
     } = options;
     this._options = {
       channelName,
-      responseTimeoutMs
+      responseTimeoutMs,
     };
     this._channel = new BroadcastChannel(channelName);
-    this._listen();
+    this._channelListener = this._listen();
     this._readyPromise = this.ready();
   }
 
   get values() {
-    let storedValues: Record<string, string> = {}
+    let storedValues: Record<string, string> = {};
     for (const key of this._storedValues.keys()) {
       const value = this._storedValues.get(key)?.value;
       if (value) {
@@ -259,75 +261,67 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
     return storedValues;
   }
 
+  get channel() {
+    return this._channel;
+  }
+
   get length() {
     return Object.keys(this.values).length;
   }
 
   get isReady() {
-    return this._ready;
+    return this._status === 'ready';
+  }
+
+  get isClosed() {
+    return this._status === 'closed';
   }
 
   get isLastInstance() {
     return this._lastInstance;
   }
 
-  ready() {
-    if (this._readyPromise) {
+  async ready() {
+    if (this._status === 'closed') {
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
+
+    if (this._status === 'loading') {
+      if (this._readyPromise) {
+        return this._readyPromise;
+      }
+      this._readyPromise = this.sync()
+        .then(() => {
+          this._status = 'ready';
+        })
+        .catch((error) => {
+          throw error;
+        });
       return this._readyPromise;
     }
 
-    return this.sync().then(() => {
-      this._ready = true;
-    })
+    return;
   }
 
-  // OLD SYNC, waited until time had completed with no further responses.
-  // sync() {
-  //   if (!this._ready && this._readyPromise) {
-  //     return this._readyPromise;
-  //   }
+  async sync() {
+    if (this._status === 'closed') {
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
 
-  //   return new Promise<void>((resolve, reject) => {
-  //     let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-  //     const handleTimeout = () => {
-  //       this._channel.removeEventListener('message', handleValuesResponse);
-  //       resolve();
-  //     };
-
-  //     const handleValuesResponse = (
-  //       event: MessageEvent<BroadcastChannelStorageMessage>,
-  //     ) => {
-  //       const action = event.data;
-  //       if (action.type !== 'state') return;
-  //       if (timeoutId) {
-  //         clearTimeout(timeoutId);
-  //       }
-  //       timeoutId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
-  //     };
-
-  //     this._channel.addEventListener('message', handleValuesResponse);
-  //     timeoutId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
-
-  //     const current: InstanceState = {
-  //       clearedTimestamp: this._clearedTimestamp,
-  //       values: Object.fromEntries(this._storedValues),
-  //     };
-  //     this._postMessage({ type: 'request', payload: current });
-  //   }) 
-  // }
-
-  sync() {
-    if (!this._ready && this._readyPromise) {
+    if (this._status === 'loading' && this._readyPromise) {
       return this._readyPromise;
     }
 
     return new Promise<void>((resolve, reject) => {
+      const { signal } = this._readyAbortController;
       let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
       const handleTimeout = () => {
-        this._channel.removeEventListener('message', handleValuesResponse);
+        if (this._channel) {
+          this._channel.removeEventListener('message', handleValuesResponse);
+        }
         this._lastInstance = true;
+        this._status = 'ready';
         resolve();
       };
 
@@ -339,22 +333,42 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         if (timeoutId) {
           clearTimeout(timeoutId);
         }
+        if (this._channel) {
+          this._channel.removeEventListener('message', handleValuesResponse);
+        }
         this._lastInstance = false;
+        this._status = 'ready';
         resolve();
       };
 
-      this._channel.addEventListener('message', handleValuesResponse, { once: true });
+      const handleAbort = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        if (this._channel) {
+          this._channel.removeEventListener('message', handleValuesResponse);
+        }
+        reject(new Error(ERROR_CLOSED_MESSAGE));
+      };
+
+      this._channel.addEventListener('message', handleValuesResponse);
       timeoutId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
+
+      signal.addEventListener('abort', handleAbort, { once: true });
 
       const current: InstanceState = {
         clearedTimestamp: this._clearedTimestamp,
         values: Object.fromEntries(this._storedValues),
       };
+
       this._postMessage({ type: 'request', payload: current });
-    }) 
+    });
   }
 
   getItem = (key: string) => {
+    if (this._status === 'closed') {
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('invalid key');
     }
@@ -363,6 +377,9 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
   };
 
   setItem = (key: string, value: string) => {
+    if (this._status === 'closed') {
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('invalid key');
     }
@@ -382,12 +399,15 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         key,
         value,
         timestamp: newValue.timestamp,
-        clearedTimestamp: this._clearedTimestamp
+        clearedTimestamp: this._clearedTimestamp,
       },
     });
   };
 
   removeItem = (key: string) => {
+    if (this._status === 'closed') {
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('invalid key');
     }
@@ -401,12 +421,15 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       payload: {
         key,
         timestamp: newValue.timestamp,
-        clearedTimestamp: this._clearedTimestamp
+        clearedTimestamp: this._clearedTimestamp,
       },
     });
   };
 
   clear = () => {
+    if (this._status === 'closed') {
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
     const clearedTimestamp = getUniqueTimestamp();
     this._storedValues.clear();
     this._clearedTimestamp = clearedTimestamp;
@@ -416,40 +439,50 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
     });
   };
 
-  // instanceCount = async () => {
-  //   await this._readyPromise;
-  //   return new Promise<number>((resolve) => {
-  //     const channel = this._channel;
-  //     const timestamp = getUniqueTimestamp();
-  //     let timerId: ReturnType<typeof setTimeout> | null = null;
-  //     let instanceCount: number = 1;
+  close = () => {
+    if (this._status === 'closed') {
+      return;
+    }
 
-  //     const handleTimeout = () => {
-  //       channel.removeEventListener('message', handlePongEvent);
-  //       resolve(instanceCount);
-  //     };
+    // cancel channel listener
+    this._channelListener.cancel();
 
-  //     const handlePongEvent = (
-  //       event: MessageEvent<BroadcastChannelStorageMessage>,
-  //     ) => {
-  //       const action = event.data;
-  //       if (action.type !== 'pong' || action.payload !== timestamp) return;
-  //       instanceCount++;
-  //       if (timerId) {
-  //         clearTimeout(timerId);
-  //       }
-  //       timerId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
-  //     };
+    // abort ready
+    if (!this._readyAbortController.signal.aborted) {
+      this._readyAbortController.abort();
+    }
 
-  //     channel.addEventListener('message', handlePongEvent);
-  //     this._postMessage({ type: 'ping', payload: timestamp });
+    // remove all listeners
+    if (this._listeners.length > 0) {
+      for (const { type, callback } of this._listeners) {
+        super.removeEventListener(type, callback);
+      }
+      this._listeners = [];
+    }
 
-  //     timerId = setTimeout(handleTimeout, this._options.responseTimeoutMs);
-  //   });
-  // };
+    // post close message
+    this._postMessage({
+      type: 'close',
+      payload: {
+        clearedTimestamp: this._clearedTimestamp,
+        values: Object.fromEntries(this._storedValues),
+      },
+    });
+
+    this._channel.close();
+    this._status = 'closed';
+  };
 
   private _postMessage(message: BroadcastChannelStorageMessage) {
-    this._channel.postMessage(message);
+    if (this._status === 'closed') {
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
+    try {
+      this._channel.postMessage(message);
+    } catch (error) {
+      this.close();
+      throw new Error(ERROR_CLOSED_MESSAGE);
+    }
   }
 
   private _merge(incoming: InstanceState, dispatchEvents = false) {
@@ -457,13 +490,14 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       clearedTimestamp: this._clearedTimestamp,
       values: Object.fromEntries(this._storedValues),
     };
-    const { clearedTimestamp, mergedValues, changedValues, clearedValues } = mergeValues(current, incoming);
+    const { clearedTimestamp, mergedValues, changedValues, clearedValues } =
+      mergeValues(current, incoming);
 
     // Update cleared timestamp
     if (this._clearedTimestamp !== clearedTimestamp) {
       this._clearedTimestamp = clearedTimestamp;
     }
-    
+
     if (Object.keys(mergedValues).length === 0 && clearedValues.length > 0) {
       // Handle when all keys are cleared
       this._storedValues.clear();
@@ -479,7 +513,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       // Update changed values
       for (const key in changedValues) {
         const oldValue = this._storedValues.get(key) || {
-          value: null
+          value: null,
         };
         const newValue = changedValues[key]!;
         this._storedValues.set(key, newValue);
@@ -495,7 +529,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         }
       }
       // Remove cleared values
-      clearedValues.forEach(key => {
+      clearedValues.forEach((key) => {
         const oldValue = this._storedValues.get(key)!;
         this._storedValues.delete(key);
         if (oldValue.value !== null) {
@@ -508,7 +542,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
             this.dispatchEvent(storageEvent);
           }
         }
-      })
+      });
     }
 
     return { clearedTimestamp, mergedValues, changedValues, clearedValues };
@@ -517,29 +551,35 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
   private _listen() {
     const channel = this._channel;
 
-    const supportsVisibilityChange = typeof document !== 'undefined' && 'visibilityState' in document;
+    const channelListener = (
+      event: MessageEvent<BroadcastChannelStorageMessage>,
+    ) => {
+      // received an event so not last instance
+      this._lastInstance = false;
 
-    const visibilityListener = () => {
-      if (supportsVisibilityChange && document.visibilityState === "visible") {
-        const current: InstanceState = {
-          clearedTimestamp: this._clearedTimestamp,
-          values: Object.fromEntries(this._storedValues),
-        };
-        this._postMessage({ type: 'request', payload: current });
-      }
-    }
-    
-    const channelListener = (event: MessageEvent<BroadcastChannelStorageMessage>) => {
+      if (this._status === 'closed') return;
+
       const action = event.data;
 
-      if (action.type === 'ping') {
-        this._lastInstance = false;
-        this._postMessage({ type: 'pong', payload: action.payload });
-      }
+      // only emit events once 'ready'
+      const emitEvents = this._status === 'ready';
 
-      if (action.type === 'request' || action.type === 'state') {
+      if (
+        action.type === 'request' ||
+        action.type === 'state' ||
+        action.type === 'close'
+      ) {
         const incoming = action.payload;
-        this._merge(incoming, true);
+
+        this._merge(incoming, emitEvents);
+
+        if (action.type === 'close') {
+          // rerun sync to see if there are still other instances
+          this.sync().catch(() => {
+            return;
+          });
+          return;
+        }
 
         if (action.type === 'request') {
           this._postMessage({
@@ -550,6 +590,8 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
             },
           });
         }
+
+        return;
       }
 
       if (action.type === 'set') {
@@ -557,10 +599,10 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         const incoming: InstanceState = {
           clearedTimestamp,
           values: {
-            [key]: { value, timestamp }
-          }
+            [key]: { value, timestamp },
+          },
         };
-        this._merge(incoming, true);
+        this._merge(incoming, emitEvents);
         return;
       }
 
@@ -569,10 +611,10 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         const incoming: InstanceState = {
           clearedTimestamp,
           values: {
-            [key]: { value: null, timestamp }
-          }
+            [key]: { value: null, timestamp },
+          },
         };
-        this._merge(incoming, true);
+        this._merge(incoming, emitEvents);
         return;
       }
 
@@ -580,23 +622,57 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         const clearedTimestamp = action.payload;
         const incoming: InstanceState = {
           clearedTimestamp,
-          values: {}
+          values: {},
         };
-        this._merge(incoming, true);
+        this._merge(incoming, emitEvents);
         return;
       }
     };
 
+    const supportsVisibilityChange =
+      typeof document !== 'undefined' && 'visibilityState' in document;
+
+    const supportsBeforeUnload =
+      typeof window !== 'undefined' && 'addEventListener' in window;
+
+    const visibilityListener = () => {
+      if (document.visibilityState === 'visible') {
+        // rerun sync to see if there are any other instances
+        this.sync().catch(() => {
+          return;
+        });
+      }
+    };
+
+    const beforeUnloadListener = () => {
+      this._postMessage({
+        type: 'close',
+        payload: {
+          clearedTimestamp: this._clearedTimestamp,
+          values: Object.fromEntries(this._storedValues),
+        },
+      });
+    };
+
     channel.addEventListener('message', channelListener);
-    if (supportsVisibilityChange) { 
+
+    if (supportsVisibilityChange) {
       document.addEventListener('visibilitychange', visibilityListener);
+    }
+    if (supportsBeforeUnload) {
+      document.addEventListener('beforeunload', beforeUnloadListener);
     }
 
     return {
       cancel: () => {
-        channel.removeEventListener('message', channelListener);
-        if (supportsVisibilityChange) { 
+        if (this._channel) {
+          this._channel.removeEventListener('message', channelListener);
+        }
+        if (supportsVisibilityChange) {
           document.removeEventListener('visibilitychange', visibilityListener);
+        }
+        if (supportsBeforeUnload) {
+          document.removeEventListener('beforeunload', beforeUnloadListener);
         }
       },
     };
