@@ -218,9 +218,26 @@ export class BroadcastChannelStorageEvent extends Event {
   }
 }
 
-export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
+export class BroadcastChannelReadyEvent extends Event {
+  constructor(type: 'ready') {
+    super(type);
+  }
+}
+
+export class BroadcastChannelClosedEvent extends Event {
+  constructor(type: 'closed') {
+    super(type);
+  }
+}
+
+type BroadcastChannelEventTypes = 'storage' | 'ready' | 'closed';
+type BroadcastChannelEvents = {
   storage: BroadcastChannelStorageEvent;
-}>) {
+  ready: BroadcastChannelReadyEvent;
+  closed: BroadcastChannelClosedEvent;
+};
+
+export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<BroadcastChannelEvents>) {
   private _options: Required<BroadcastChannelStorageOptions>;
   private _storedValues: Map<string, StoredValue> = new Map();
   private _clearedTimestamp: number | null = null;
@@ -231,6 +248,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
   private _listeners: {
     type: string;
     callback: EventListenerOrEventListenerObject;
+    options: boolean | AddEventListenerOptions | undefined;
   }[] = [];
   private _lastInstance: boolean = false;
   private _status: 'loading' | 'ready' | 'closed' = 'loading';
@@ -293,6 +311,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       this._readyPromise = this.sync()
         .then(() => {
           this._status = 'ready';
+          this.dispatchEvent(new BroadcastChannelReadyEvent('ready'));
         })
         .catch((error) => {
           throw error;
@@ -452,14 +471,6 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
       this._readyAbortController.abort();
     }
 
-    // remove all listeners
-    if (this._listeners.length > 0) {
-      for (const { type, callback } of this._listeners) {
-        super.removeEventListener(type, callback);
-      }
-      this._listeners = [];
-    }
-
     // post close message
     this._postMessage({
       type: 'close',
@@ -468,9 +479,19 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
         values: Object.fromEntries(this._storedValues),
       },
     });
-
     this._channel.close();
     this._status = 'closed';
+
+    // Dispatch close event
+    this.dispatchEvent(new BroadcastChannelClosedEvent('closed'));
+
+    // remove all listeners
+    if (this._listeners.length > 0) {
+      for (const { type, callback, options } of this._listeners) {
+        super.removeEventListener(type, callback, options);
+      }
+      this._listeners = [];
+    }
   };
 
   private _postMessage(message: BroadcastChannelStorageMessage) {
@@ -678,33 +699,34 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<{
     };
   }
 
-  override addEventListener<K extends 'storage'>(
+  override addEventListener<K extends BroadcastChannelEventTypes>(
     type: K,
     callback: (
-      event: { storage: BroadcastChannelStorageEvent }[K] extends Event
-        ? { storage: BroadcastChannelStorageEvent }[K]
+      event: BroadcastChannelEvents[K] extends Event
+        ? {
+            storage: BroadcastChannelStorageEvent;
+            ready: BroadcastChannelReadyEvent;
+            closed: BroadcastChannelClosedEvent;
+          }[K]
         : never,
-    ) => { storage: BroadcastChannelStorageEvent }[K] extends Event
-      ? void
-      : never,
+    ) => BroadcastChannelEvents[K] extends Event ? void : never,
     options?: AddEventListenerOptions | boolean,
   ): void {
     super.addEventListener(type, callback, options);
     this._listeners.push({
       type,
       callback: callback as unknown as EventListenerOrEventListenerObject,
+      options,
     });
   }
 
-  override removeEventListener<K extends 'storage'>(
+  override removeEventListener<K extends BroadcastChannelEventTypes>(
     type: K,
     callback: (
-      event: { storage: BroadcastChannelStorageEvent }[K] extends Event
-        ? { storage: BroadcastChannelStorageEvent }[K]
+      event: BroadcastChannelEvents[K] extends Event
+        ? BroadcastChannelEvents[K]
         : never,
-    ) => { storage: BroadcastChannelStorageEvent }[K] extends Event
-      ? void
-      : never,
+    ) => BroadcastChannelEvents[K] extends Event ? void : never,
     options?: EventListenerOptions | boolean,
   ): void {
     super.removeEventListener(type, callback, options);
