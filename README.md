@@ -27,7 +27,7 @@ You can also provide optional values to the constructor:
 ```javascript
 const storage = new BroadcastChannelStorage({
   channelName: 'my-channel', // BroadcastChannel name. Default is '__broadcast-channel-storage'
-  responseTimeoutMs: 200 // Timeout while waiting for response from sync/ready. Default is 200ms
+  responseTimeoutMs: 200, // Timeout while waiting for response from sync/ready. Default is 200ms
 });
 ```
 
@@ -59,7 +59,9 @@ storage.clear();
 
 ```javascript
 storage.addEventListener('storage', (event) => {
-  console.log(`Key ${event.key} changed from ${event.oldValue} to ${event.newValue}`);
+  console.log(
+    `Key ${event.key} changed from ${event.oldValue} to ${event.newValue}`,
+  );
 });
 ```
 
