@@ -35,7 +35,7 @@
     "local-release": "changeset version && changeset publish"
   },
   "devDependencies": {
-    "@arethetypeswrong/cli": "^0.17.2",
+    "@arethetypeswrong/cli": "^0.17.3",
     "@changesets/cli": "^2.27.11",
     "jsdom": "^26.0.0",
     "prettier": "^3.4.2",
