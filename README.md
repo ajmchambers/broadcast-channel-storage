@@ -104,9 +104,11 @@ console.log(storage.isLastInstance);
 
 The library extends `EventTarget` and emits the following events:
 
-- `storage`: Emitted when a storage item is changed.
+- `change`: Emitted on current instance when a storage item is changed.
+- `storage`: Emitted on other instances when a storage item is changed.
 - `ready`: Emitted when the initial sync has completed.
-- `closed`: Emitted when the storage instance is closed.
+- `closed`: Emitted when the current storage instance is closed.
+- `last-instance`: Emitted when the `isLastInstance` flag changes.
 
 ## API
 

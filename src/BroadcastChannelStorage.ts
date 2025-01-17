@@ -203,15 +203,36 @@ export class BroadcastChannelStorageEvent extends Event {
   key: string | null;
   oldValue: string | null;
   newValue: string | null;
-  constructor(
-    type: 'storage',
-    {
-      key,
-      oldValue,
-      newValue,
-    }: { key: string | null; oldValue: string | null; newValue: string | null },
-  ) {
-    super(type);
+  constructor({
+    key,
+    oldValue,
+    newValue,
+  }: {
+    key: string | null;
+    oldValue: string | null;
+    newValue: string | null;
+  }) {
+    super('storage');
+    this.key = key;
+    this.oldValue = oldValue;
+    this.newValue = newValue;
+  }
+}
+
+export class BroadcastChannelChangeEvent extends Event {
+  key: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  constructor({
+    key,
+    oldValue,
+    newValue,
+  }: {
+    key: string | null;
+    oldValue: string | null;
+    newValue: string | null;
+  }) {
+    super('change');
     this.key = key;
     this.oldValue = oldValue;
     this.newValue = newValue;
@@ -219,22 +240,37 @@ export class BroadcastChannelStorageEvent extends Event {
 }
 
 export class BroadcastChannelReadyEvent extends Event {
-  constructor(type: 'ready') {
-    super(type);
+  constructor() {
+    super('ready');
+  }
+}
+
+export class BroadcastChannelLastInstanceEvent extends Event {
+  isLastInstance: boolean;
+  constructor(isLastInstance: boolean) {
+    super('last-instance');
+    this.isLastInstance = isLastInstance;
   }
 }
 
 export class BroadcastChannelClosedEvent extends Event {
-  constructor(type: 'closed') {
-    super(type);
+  constructor() {
+    super('closed');
   }
 }
 
-type BroadcastChannelEventTypes = 'storage' | 'ready' | 'closed';
+type BroadcastChannelEventTypes =
+  | 'change'
+  | 'storage'
+  | 'ready'
+  | 'closed'
+  | 'last-instance';
 type BroadcastChannelEvents = {
-  storage: BroadcastChannelStorageEvent;
+  change: BroadcastChannelStorageEvent;
+  storage: BroadcastChannelChangeEvent;
   ready: BroadcastChannelReadyEvent;
   closed: BroadcastChannelClosedEvent;
+  ['last-instance']: BroadcastChannelLastInstanceEvent;
 };
 
 export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<BroadcastChannelEvents>) {
@@ -243,6 +279,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
   private _clearedTimestamp: number | null = null;
   private _channel: BroadcastChannel;
   private _readyPromise: Promise<void>;
+  private _readyCalled: boolean;
   private _readyAbortController: AbortController = new AbortController();
   private _channelListener;
   private _listeners: {
@@ -266,6 +303,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
     this._channel = new BroadcastChannel(channelName);
     this._channelListener = this._listen();
     this._readyPromise = this.ready();
+    this._readyCalled = false;
   }
 
   get values() {
@@ -306,15 +344,20 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
 
     if (this._status === 'loading') {
       if (this._readyPromise) {
+        // Don't want set on initial run (in constructor), only on subsequent calls
+        this._readyCalled = true;
         return this._readyPromise;
       }
       this._readyPromise = this.sync()
         .then(() => {
           this._status = 'ready';
-          this.dispatchEvent(new BroadcastChannelReadyEvent('ready'));
+          this.dispatchEvent(new BroadcastChannelReadyEvent());
         })
         .catch((error) => {
-          throw error;
+          if (this._readyCalled) {
+            throw error;
+          }
+          return;
         });
       return this._readyPromise;
     }
@@ -339,7 +382,10 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         if (this._channel) {
           this._channel.removeEventListener('message', handleValuesResponse);
         }
-        this._lastInstance = true;
+        if (!this._lastInstance) {
+          this._lastInstance = true;
+          this.dispatchEvent(new BroadcastChannelLastInstanceEvent(true));
+        }
         this._status = 'ready';
         resolve();
       };
@@ -355,7 +401,10 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         if (this._channel) {
           this._channel.removeEventListener('message', handleValuesResponse);
         }
-        this._lastInstance = false;
+        if (this._lastInstance) {
+          this._lastInstance = false;
+          this.dispatchEvent(new BroadcastChannelLastInstanceEvent(false));
+        }
         this._status = 'ready';
         resolve();
       };
@@ -384,7 +433,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
     });
   }
 
-  getItem = (key: string) => {
+  getItem = (key: string): string | null => {
     if (this._status === 'closed') {
       throw new Error(ERROR_CLOSED_MESSAGE);
     }
@@ -403,14 +452,13 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
       throw new Error('invalid key');
     }
     const newValue = {
-      value,
+      value: String(value),
       timestamp: getUniqueTimestamp(),
     };
     const oldValue = this._storedValues.get(key) || {
       value: null,
       timestamp: null,
     };
-    if (newValue.value === oldValue.value) return;
     this._storedValues.set(key, newValue);
     this._postMessage({
       type: 'set',
@@ -421,6 +469,13 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         clearedTimestamp: this._clearedTimestamp,
       },
     });
+    if (newValue.value === oldValue.value) return;
+    const changeEvent = new BroadcastChannelChangeEvent({
+      key,
+      oldValue: oldValue.value,
+      newValue: newValue.value,
+    });
+    this.dispatchEvent(changeEvent);
   };
 
   removeItem = (key: string) => {
@@ -434,6 +489,10 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
       value: null,
       timestamp: getUniqueTimestamp(),
     };
+    const oldValue = this._storedValues.get(key) || {
+      value: null,
+      timestamp: null,
+    };
     this._storedValues.set(key, newValue);
     this._postMessage({
       type: 'remove',
@@ -443,6 +502,13 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         clearedTimestamp: this._clearedTimestamp,
       },
     });
+    if (newValue.value === oldValue.value) return;
+    const changeEvent = new BroadcastChannelChangeEvent({
+      key,
+      oldValue: oldValue.value,
+      newValue: newValue.value,
+    });
+    this.dispatchEvent(changeEvent);
   };
 
   clear = () => {
@@ -456,6 +522,12 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
       type: 'clear',
       payload: clearedTimestamp,
     });
+    const changeEvent = new BroadcastChannelChangeEvent({
+      key: null,
+      oldValue: null,
+      newValue: null,
+    });
+    this.dispatchEvent(changeEvent);
   };
 
   close = () => {
@@ -483,7 +555,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
     this._status = 'closed';
 
     // Dispatch close event
-    this.dispatchEvent(new BroadcastChannelClosedEvent('closed'));
+    this.dispatchEvent(new BroadcastChannelClosedEvent());
 
     // remove all listeners
     if (this._listeners.length > 0) {
@@ -522,7 +594,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
     if (Object.keys(mergedValues).length === 0 && clearedValues.length > 0) {
       // Handle when all keys are cleared
       this._storedValues.clear();
-      const storageEvent = new BroadcastChannelStorageEvent('storage', {
+      const storageEvent = new BroadcastChannelStorageEvent({
         key: null,
         oldValue: null,
         newValue: null,
@@ -539,7 +611,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         const newValue = changedValues[key]!;
         this._storedValues.set(key, newValue);
         if (oldValue.value !== newValue.value) {
-          const storageEvent = new BroadcastChannelStorageEvent('storage', {
+          const storageEvent = new BroadcastChannelStorageEvent({
             key,
             oldValue: oldValue.value,
             newValue: newValue.value,
@@ -554,7 +626,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         const oldValue = this._storedValues.get(key)!;
         this._storedValues.delete(key);
         if (oldValue.value !== null) {
-          const storageEvent = new BroadcastChannelStorageEvent('storage', {
+          const storageEvent = new BroadcastChannelStorageEvent({
             key,
             oldValue: oldValue.value,
             newValue: null,
@@ -576,7 +648,10 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
       event: MessageEvent<BroadcastChannelStorageMessage>,
     ) => {
       // received an event so not last instance
-      this._lastInstance = false;
+      if (this._lastInstance) {
+        this._lastInstance = false;
+        this.dispatchEvent(new BroadcastChannelLastInstanceEvent(false));
+      }
 
       if (this._status === 'closed') return;
 
@@ -703,11 +778,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
     type: K,
     callback: (
       event: BroadcastChannelEvents[K] extends Event
-        ? {
-            storage: BroadcastChannelStorageEvent;
-            ready: BroadcastChannelReadyEvent;
-            closed: BroadcastChannelClosedEvent;
-          }[K]
+        ? BroadcastChannelEvents[K]
         : never,
     ) => BroadcastChannelEvents[K] extends Event ? void : never,
     options?: AddEventListenerOptions | boolean,

@@ -4,6 +4,7 @@ import {
   mergeValues,
   getUniqueTimestamp,
   BroadcastChannelClosedEvent,
+  BroadcastChannelLastInstanceEvent,
 } from '../src/BroadcastChannelStorage.js';
 import {
   BroadcastChannelReadyEvent,
@@ -247,6 +248,71 @@ describe('BroadcastChannelStorage', () => {
     storage2.close();
     await storage1.sync();
     expect(storage1.isLastInstance).toBe(true);
+  });
+
+  it("should emit 'last-instance' events", async () => {
+    // Create a mock event listener
+    const lastInstanceListener = vi.fn();
+
+    storage1 = new BroadcastChannelStorage();
+    storage1.addEventListener('last-instance', lastInstanceListener);
+    expect(storage1.isLastInstance).toBe(false);
+
+    await storage1.ready();
+
+    expect(storage1.isLastInstance).toBe(true);
+    expect(lastInstanceListener).toHaveBeenCalledOnce();
+    const event1: BroadcastChannelLastInstanceEvent =
+      lastInstanceListener.mock.calls[0][0];
+    expect(event1.isLastInstance).toBe(true);
+    storage2 = new BroadcastChannelStorage();
+
+    // Wait for the event to be processed
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(storage1.isLastInstance).toBe(false);
+    expect(lastInstanceListener).toHaveBeenCalledTimes(2);
+    const event2: BroadcastChannelLastInstanceEvent =
+      lastInstanceListener.mock.calls[1][0];
+    expect(event2.isLastInstance).toBe(false);
+
+    storage2.close();
+    await storage1.sync();
+
+    expect(storage1.isLastInstance).toBe(true);
+    expect(lastInstanceListener).toHaveBeenCalledTimes(3);
+    const event3: BroadcastChannelLastInstanceEvent =
+      lastInstanceListener.mock.calls[2][0];
+    expect(event3.isLastInstance).toBe(true);
+  });
+
+  it("should emit 'change' events only on the instance that made the change, and 'storage' events on other instances.", async () => {
+    // Create a mock event listener
+    const s1ChangeListener = vi.fn();
+    const s2ChangeListener = vi.fn();
+    const s1StorageListener = vi.fn();
+    const s2StorageListener = vi.fn();
+
+    storage1 = new BroadcastChannelStorage();
+    storage2 = new BroadcastChannelStorage();
+    storage1.addEventListener('change', s1ChangeListener);
+    storage1.addEventListener('storage', s1StorageListener);
+    storage2.addEventListener('change', s2ChangeListener);
+    storage2.addEventListener('storage', s2StorageListener);
+
+    await Promise.all([storage1.ready(), storage2.ready()]);
+
+    storage1.setItem('test', '123');
+
+    // Wait for the event to be processed
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    await Promise.all([storage1.ready(), storage2.ready()]);
+
+    expect(s1ChangeListener).toHaveBeenCalledOnce();
+    expect(s1StorageListener).not.toHaveBeenCalled();
+    expect(s2ChangeListener).not.toHaveBeenCalled();
+    expect(s2StorageListener).toHaveBeenCalledOnce();
   });
 
   it('should only emit a storage event once finished starting', async () => {
