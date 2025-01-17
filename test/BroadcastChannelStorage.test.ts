@@ -1,16 +1,14 @@
 import {
-  BroadcastChannelStorageEvent,
-  BroadcastChannelStorage,
-  mergeValues,
-  getUniqueTimestamp,
   BroadcastChannelClosedEvent,
   BroadcastChannelLastInstanceEvent,
-} from '../src/BroadcastChannelStorage.js';
-import {
   BroadcastChannelReadyEvent,
-  InstanceState,
+  BroadcastChannelStorage,
+  BroadcastChannelStorageEvent,
+  getUniqueTimestamp,
+  mergeValues,
 } from '../src/BroadcastChannelStorage.js';
-import { it, expect, describe, vi, afterEach } from 'vitest';
+import type { InstanceState } from '../src/BroadcastChannelStorage.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 describe('getUniqueTimestamp', () => {
   it('should produce ascending timestamp values if getUniqueTimestamp is run in quick succession in same process.', () => {
