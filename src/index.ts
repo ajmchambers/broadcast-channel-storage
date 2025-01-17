@@ -1,2 +1,8 @@
-export type { BroadcastChannelStorageOptions } from './BroadcastChannelStorage.js';
+export type {
+  BroadcastChannelStorageOptions,
+  BroadcastChannelReadyEvent,
+  BroadcastChannelClosedEvent,
+  BroadcastChannelChangeEvent,
+  BroadcastChannelStorageEvent,
+} from './BroadcastChannelStorage.js';
 export { BroadcastChannelStorage } from './BroadcastChannelStorage.js';
