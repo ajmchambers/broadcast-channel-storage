@@ -13,7 +13,7 @@ npm install broadcast-channel-storage
 ### Importing the Library
 
 ```javascript
-import BroadcastChannelStorage from 'broadcast-channel-storage';
+import { BroadcastChannelStorage } from 'broadcast-channel-storage';
 ```
 
 ### Creating an Instance
