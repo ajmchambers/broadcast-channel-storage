@@ -1,5 +1,11 @@
 # broadcast-channel-storage
 
+## 0.1.2
+
+### Patch Changes
+
+- 25571aa: improved last instance detection
+
 ## 0.1.1
 
 ### Patch Changes
