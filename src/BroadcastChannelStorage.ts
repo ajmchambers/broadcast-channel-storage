@@ -728,7 +728,7 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
     const supportsVisibilityChange =
       typeof document !== 'undefined' && 'visibilityState' in document;
 
-    const supportsBeforeUnload =
+    const supportsWindowEvents =
       typeof window !== 'undefined' && 'addEventListener' in window;
 
     const visibilityListener = () => {
@@ -738,6 +738,13 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
           return;
         });
       }
+    };
+
+    const focusListener = () => {
+      // rerun sync to see if there are any other instances
+      this.sync().catch(() => {
+        return;
+      });
     };
 
     const beforeUnloadListener = () => {
@@ -755,8 +762,9 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
     if (supportsVisibilityChange) {
       document.addEventListener('visibilitychange', visibilityListener);
     }
-    if (supportsBeforeUnload) {
-      document.addEventListener('beforeunload', beforeUnloadListener);
+    if (supportsWindowEvents) {
+      window.addEventListener('focus', focusListener);
+      window.addEventListener('beforeunload', beforeUnloadListener);
     }
 
     return {
@@ -767,8 +775,9 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         if (supportsVisibilityChange) {
           document.removeEventListener('visibilitychange', visibilityListener);
         }
-        if (supportsBeforeUnload) {
-          document.removeEventListener('beforeunload', beforeUnloadListener);
+        if (supportsWindowEvents) {
+          window.removeEventListener('focus', focusListener);
+          window.removeEventListener('beforeunload', beforeUnloadListener);
         }
       },
     };
