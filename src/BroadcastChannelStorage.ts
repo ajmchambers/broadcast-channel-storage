@@ -670,10 +670,12 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
         this._merge(incoming, emitEvents);
 
         if (action.type === 'close') {
-          // rerun sync to see if there are still other instances
-          this.sync().catch(() => {
-            return;
-          });
+          // rerun sync to see if there are still other instances, delay to allow time for other instance to close
+          setTimeout(() => {
+            this.sync().catch(() => {
+              return;
+            });
+          }, this._options.responseTimeoutMs);
           return;
         }
 
@@ -686,7 +688,6 @@ export class BroadcastChannelStorage extends (EventTarget as TypedEventTarget<Br
             },
           });
         }
-
         return;
       }
 
